@@ -1,0 +1,14 @@
+# Binaries and logs
+gateway/bin/
+*.log
+gateway/gateway.log
+dashboard/dashboard.log
+
+# Next.js and Node
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+
+# OS metadata
+.DS_Store
+*.tmp

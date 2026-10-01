@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #000000;
+  --surface-1: #0a0a0a;
+  --surface-2: #111111;
+  --surface-3: #171717;
+  --surface-hover: #191919;
+  
+  --border-subtle: #1e1e1e;
+  --border-muted: #292929;
+  --border-active: #383838;
+
+  --text-main: #ededed;
+  --text-muted: #a1a1a1;
+  --text-dim: #707070;
+  --text-subtle: #4d4d4d;
+
+  /* Vercel & Cloudflare Accents */
+  --blue: #0070f3;
+  --blue-subtle: rgba(0, 112, 243, 0.1);
+  --blue-border: rgba(0, 112, 243, 0.25);
+
+  --emerald: #10b981;
+  --emerald-subtle: rgba(16, 185, 129, 0.1);
+  --emerald-border: rgba(16, 185, 129, 0.25);
+
+  --amber: #f59e0b;
+  --amber-subtle: rgba(245, 158, 11, 0.1);
+  --amber-border: rgba(245, 158, 11, 0.25);
+
+  --red: #ef4444;
+  --red-subtle: rgba(239, 68, 68, 0.1);
+  --red-border: rgba(239, 68, 68, 0.25);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Geist", "Inter", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Geist Mono", Menlo, Monaco, Consolas, monospace;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Vercel Clean Card Surface */
+.vercel-card {
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.vercel-card:hover {
+  border-color: var(--border-muted);
+}
+
+.vercel-card-interactive:hover {
+  background: var(--surface-2);
+  border-color: var(--border-active);
+}
+
+/* Subtle Table Grid Lines */
+.table-grid th, .table-grid td {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #262626;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a3a;
+}
