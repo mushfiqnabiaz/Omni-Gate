@@ -5,6 +5,7 @@ module.exports = {
       script: "./bin/gateway",
       cwd: "./gateway",
       watch: false,
+      env_file: "./gateway/.env",
       env: {
         PORT: 8050,
       }

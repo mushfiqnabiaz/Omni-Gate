@@ -33,7 +33,8 @@ export default function PlaygroundPage() {
 
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
-        setPlaygroundOutput(`HTTP ${res.status}: ${errJson.error || "Failed to complete stream"}`);
+        const errStr = typeof errJson.error === 'object' ? errJson.error.message : errJson.error;
+        setPlaygroundOutput(`HTTP ${res.status}: ${errStr || "Failed to complete stream"}`);
         setPlaygroundLoading(false);
         return;
       }

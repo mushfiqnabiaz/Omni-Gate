@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -18,10 +19,10 @@ import (
 	"github.com/antigravity/gateway/pkg/models"
 )
 
-const (
+var (
 	GoogleTokenURL     = "https://oauth2.googleapis.com/token"
-	GoogleClientID     = "YOUR_CLIENT_ID" // Must be provided via environment in production
-	GoogleClientSecret = "YOUR_CLIENT_SECRET"
+	GoogleClientID     = os.Getenv("GOOGLE_CLIENT_ID")
+	GoogleClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
 	CloudCodeQuotaURL  = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 	CloudCodeUserAgent = "antigravity/4.3.0 darwin/arm64"
 )

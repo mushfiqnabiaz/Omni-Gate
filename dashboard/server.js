@@ -16,17 +16,27 @@ const httpsOptions = {
 
 app.prepare().then(() => {
   // 1. The Secure Next.js Server
-  https.createServer(httpsOptions, (req, res) => {
+  const secureServer = https.createServer(httpsOptions, (req, res) => {
     const parsedUrl = parse(req.url, true);
     handle(req, res, parsedUrl);
-  }).listen(443, (err) => {
-    if (err) throw err;
+  });
+
+  secureServer.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+      console.log('> Port 443 is blocked. Falling back to 8444...');
+      secureServer.listen(8444);
+    } else {
+      console.error(e);
+    }
+  });
+
+  secureServer.listen(443, () => {
     console.log('> Ready on https://omnigate.local');
   });
 
   // 2. The Automatic HTTP -> HTTPS Redirector
   http.createServer((req, res) => {
-    res.writeHead(301, { "Location": "https://omnigate.local:8443" + req.url });
+    res.writeHead(302, { "Location": "https://omnigate.local:8444" + req.url });
     res.end();
   }).listen(80, (err) => {
     if (err) throw err;

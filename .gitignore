@@ -12,3 +12,4 @@ dashboard/out/
 # OS metadata
 .DS_Store
 *.tmp
+.env
