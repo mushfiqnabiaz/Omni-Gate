@@ -221,11 +221,6 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
     setLoading(true);
     Promise.all([fetchFleet(), fetchKeys(), fetchLogs()]).finally(() => setLoading(false));
 
-    // Fast 1.5s interval for realtime call streaming
-    const logInterval = setInterval(() => {
-      fetchLogs();
-    }, 1500);
-
     // 5s interval for fleet & keys
     const fleetInterval = setInterval(() => {
       fetchFleet();
@@ -233,7 +228,6 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
     }, 5000);
 
     return () => {
-      clearInterval(logInterval);
       clearInterval(fleetInterval);
     };
   }, []);

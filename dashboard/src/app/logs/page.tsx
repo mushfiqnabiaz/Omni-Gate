@@ -385,6 +385,25 @@ export default function CallLoggerPage() {
               />
             </div>
 
+            {/* Model Selector */}
+            <div className="flex items-center gap-1 text-xs font-mono text-[#707070] bg-[#0a0a0a] px-2.5 py-1 rounded-md border border-[#222222]">
+              <span>Model:</span>
+              <select
+                value={selectedModel}
+                onChange={(e) => {
+                  setSelectedModel(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className="bg-transparent text-white font-mono focus:outline-none cursor-pointer"
+              >
+                <option value="all" className="bg-black text-white">All Models</option>
+                <option value="gemini-1.5-flash" className="bg-black text-white">Gemini 1.5 Flash</option>
+                <option value="gemini-1.5-pro" className="bg-black text-white">Gemini 1.5 Pro</option>
+                <option value="claude-3-5-sonnet-20240620" className="bg-black text-white">Claude 3.5 Sonnet</option>
+                <option value="gpt-4o" className="bg-black text-white">GPT-4o</option>
+              </select>
+            </div>
+
             {/* Page Size Selector (Default 10) */}
             <div className="flex items-center gap-1 text-xs font-mono text-[#707070] bg-[#0a0a0a] px-2.5 py-1 rounded-md border border-[#222222]">
               <span>Rows:</span>

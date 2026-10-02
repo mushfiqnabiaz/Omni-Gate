@@ -94,6 +94,34 @@ func estimateCompletionTokens(totalChars int) int {
 	return tokens
 }
 
+func analyzePromptComplexity(messages []models.ChatMessage) int {
+	var fullText string
+	for _, m := range messages {
+		fullText += m.Content + "\n"
+	}
+	score := 0
+	if len(fullText) > 1000 {
+		score += 30
+	}
+	if strings.Contains(fullText, "```") {
+		score += 30
+	}
+	if strings.Contains(fullText, "{") && strings.Contains(fullText, "}") {
+		score += 15
+	}
+	lower := strings.ToLower(fullText)
+	complexKeywords := []string{"refactor", "architect", "debug", "analyze", "explain", "generate", "build", "design"}
+	for _, kw := range complexKeywords {
+		if strings.Contains(lower, kw) {
+			score += 10
+		}
+	}
+	if score > 100 {
+		score = 100
+	}
+	return score
+}
+
 type Router struct {
 	db          *db.DB
 	rotator     *shield.Rotator
@@ -326,6 +354,30 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 		default:
 			provider = models.ProviderGoogle
 		}
+	}
+
+	// 0. Semantic Cost-Arbitrage Routing (Auto-Downgrade/Upgrade)
+	if req.Header.Get("X-OmniGate-Auto-Route") == "true" || chatReq.Model == "auto" {
+		complexity := analyzePromptComplexity(chatReq.Messages)
+		oldModel := chatReq.Model
+		if complexity < 30 {
+			chatReq.Model = "gemini-1.5-flash"
+			provider = models.ProviderGoogle
+		} else if complexity < 70 {
+			chatReq.Model = "claude-3-5-haiku" // or gemini-1.5-pro
+			provider = models.ProviderClaude
+		} else {
+			chatReq.Model = "claude-3-5-sonnet-20240620"
+			provider = models.ProviderClaude
+		}
+		log.Printf("[Gateway] 🧠 Cost-Arbitrage Engine: Complexity %d/100. Routed %s -> %s", complexity, oldModel, chatReq.Model)
+	}
+
+	// 0.5. Multi-Model Race Engine
+	raceHeader := req.Header.Get("X-OmniGate-Race")
+	if raceHeader != "" && chatReq.Stream {
+		r.handleRaceEngine(req.Context(), w, req, vKeyID, chatReq, raceHeader, promptTokens, startTime)
+		return
 	}
 
 	// 1. Semantic Prompt Cache Check (Sub-100ms)
@@ -2174,5 +2226,109 @@ func (r *Router) handleShieldEvaluate(w http.ResponseWriter, req *http.Request) 
 			"message":   "Account operating safely within thresholds; no handover necessary.",
 		})
 	}
+}
+
+func (r *Router) handleRaceEngine(ctx context.Context, w http.ResponseWriter, req *http.Request, vKeyID string, chatReq models.ChatCompletionRequest, raceHeader string, promptTokens int, startTime time.Time) {
+	raceModels := strings.Split(raceHeader, ",")
+	if len(raceModels) < 2 {
+		http.Error(w, "X-OmniGate-Race requires at least 2 comma-separated models", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[Gateway] 🏎️ MULTI-MODEL RACE INITIATED: %v", raceModels)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	raceCtx, cancelRace := context.WithCancel(ctx)
+	defer cancelRace()
+
+	var wg sync.WaitGroup
+	var winnerMutex sync.Mutex
+	winnerFound := false
+
+	type raceResult struct {
+		model            string
+		provider         string
+		accountID        string
+		completionTokens int
+		err              error
+	}
+
+	results := make(chan raceResult, len(raceModels))
+
+	for _, raceModel := range raceModels {
+		modelName := strings.TrimSpace(raceModel)
+		if modelName == "" {
+			continue
+		}
+
+		wg.Add(1)
+		go func(m string) {
+			defer wg.Done()
+
+			provider := models.ProviderGoogle
+			if strings.HasPrefix(m, "claude") {
+				provider = models.ProviderClaude
+			} else if strings.HasPrefix(m, "gpt") || strings.HasPrefix(m, "o1") || strings.HasPrefix(m, "o3") {
+				provider = models.ProviderCodex
+			}
+
+			account, err := r.rotator.SelectAccount(raceCtx, provider)
+			if err != nil {
+				return
+			}
+
+			localReq := chatReq
+			localReq.Model = m
+			localReq.Provider = provider
+
+			isWinner := false
+
+			onChunk := func(chunkJSON string) {
+				winnerMutex.Lock()
+				if !winnerFound {
+					winnerFound = true
+					isWinner = true
+					log.Printf("[Gateway] 🏆 RACE WON BY: %s", m)
+				}
+				winnerMutex.Unlock()
+
+				if isWinner {
+					fmt.Fprintf(w, "data: %s\n\n", chunkJSON)
+					flusher.Flush()
+				} else {
+					cancelRace() // Kill losers instantly
+				}
+			}
+
+			completionTokens, err := r.executeStream(raceCtx, w, flusher, provider, account, &localReq, nil, onChunk)
+
+			if isWinner {
+				results <- raceResult{model: m, provider: provider, accountID: account.ID, completionTokens: completionTokens, err: err}
+			}
+
+		}(modelName)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	winnerResult := <-results
+	if winnerResult.err != nil {
+		log.Printf("[Gateway] 🚨 Race winner failed: %v", winnerResult.err)
+	}
+
+	durMs := int(time.Since(startTime).Milliseconds())
+	_ = r.db.RecordRequestLog(ctx, uuid.New().String(), vKeyID, winnerResult.accountID, winnerResult.provider, winnerResult.model, promptTokens, winnerResult.completionTokens, durMs, http.StatusOK, "Race Winner")
+	_ = r.db.RecordKeyUsage(ctx, vKeyID, promptTokens+winnerResult.completionTokens)
 }
 
