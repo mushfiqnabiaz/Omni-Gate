@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,8 +19,48 @@ import (
 	"github.com/antigravity/gateway/pkg/shield"
 )
 
+// loadEnvFile reads gateway/.env into the process. pm2 is not passing that
+// file through, so token refresh was posted with an empty client id and
+// Google rejected it. A switch then still rewrote the IDE and Desktop login.
+func loadEnvFile() {
+	candidates := []string{".env"}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append([]string{filepath.Join(filepath.Dir(exe), ".env")}, candidates...)
+	}
+	for _, path := range candidates {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			key, val, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			key = strings.TrimSpace(key)
+			val = strings.Trim(strings.TrimSpace(val), `"'`)
+			if key == "" || os.Getenv(key) != "" {
+				continue
+			}
+			_ = os.Setenv(key, val)
+		}
+		_ = f.Close()
+		log.Printf("Loaded environment from %s", path)
+		return
+	}
+}
+
 func main() {
+	loadEnvFile()
 	log.Println("🚀 Starting Antigravity Enterprise Gateway...")
+	if os.Getenv("GOOGLE_CLIENT_ID") == "" || os.Getenv("GOOGLE_CLIENT_SECRET") == "" {
+		log.Println("⚠️ GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing; account switch cannot refresh tokens")
+	}
 
 	// PostgreSQL database connection string (OrbStack dev-postgres)
 	dbConn := os.Getenv("DATABASE_URL")

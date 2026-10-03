@@ -56,6 +56,7 @@ type AccountQuotas struct {
 type GoogleCredentials struct {
 	AccessToken     string `json:"access_token"`
 	RefreshToken    string `json:"refresh_token"`
+	IdToken         string `json:"id_token,omitempty"`
 	ExpiryTimestamp int64  `json:"expiry_timestamp"`
 	ProjectID       string `json:"project_id"`
 }

@@ -17,7 +17,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/antigravity/gateway/pkg/models"
@@ -30,16 +29,16 @@ const (
 )
 
 type LanguageServerInfo struct {
-	PID                    int      `json:"pid"`
-	CSRF                   string   `json:"csrf"`
-	Ports                  []int    `json:"ports"`
-	Email                  string   `json:"email"`
-	Name                   string   `json:"name"`
-	Tier                   string   `json:"tier"`
-	AppType                string   `json:"app_type"`
-	Connected              bool     `json:"connected"`
-	ModelsCount            int      `json:"models_count"`
-	QuotaRemainingFraction float64  `json:"quota_remaining_fraction"`
+	PID                    int     `json:"pid"`
+	CSRF                   string  `json:"csrf"`
+	Ports                  []int   `json:"ports"`
+	Email                  string  `json:"email"`
+	Name                   string  `json:"name"`
+	Tier                   string  `json:"tier"`
+	AppType                string  `json:"app_type"`
+	Connected              bool    `json:"connected"`
+	ModelsCount            int     `json:"models_count"`
+	QuotaRemainingFraction float64 `json:"quota_remaining_fraction"`
 }
 
 type Supervisor struct {
@@ -73,7 +72,7 @@ func BuildJetskiDocument(creds *models.GoogleCredentials) map[string]any {
 	}
 	rfc3339 := expTime.Format("2006-01-02T15:04:05.000000Z")
 
-	return map[string]any{
+	doc := map[string]any{
 		"token": map[string]any{
 			"access_token":  creds.AccessToken,
 			"token_type":    "Bearer",
@@ -82,6 +81,10 @@ func BuildJetskiDocument(creds *models.GoogleCredentials) map[string]any {
 		},
 		"auth_method": "consumer",
 	}
+	if creds.IdToken != "" {
+		doc["id_token"] = creds.IdToken
+	}
+	return doc
 }
 
 // WriteKeychainToken safely writes OAuth tokens to macOS Keychain
@@ -145,6 +148,22 @@ func (s *Supervisor) WriteJetskiToken(creds *models.GoogleCredentials) error {
 
 	_ = os.Chmod(target, 0600)
 	log.Printf("[Antigravity] 📄 Updated %s\n", target)
+
+	// Desktop's standalone language server reads this file on respawn.
+	// The IDE does not; it takes the unified-state update below.
+	oauthDoc := map[string]any{
+		"access_token":  creds.AccessToken,
+		"refresh_token": creds.RefreshToken,
+		"token_type":    "Bearer",
+		"expiry_date":   expiryMillis(creds.ExpiryTimestamp),
+		"scope":         "https://www.googleapis.com/auth/userinfo.email openid https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.profile",
+	}
+	if oauthBytes, err := json.MarshalIndent(oauthDoc, "", "  "); err == nil {
+		oauthPath := filepath.Join(geminiDir, "oauth_creds.json")
+		if err := os.WriteFile(oauthPath, oauthBytes, 0600); err != nil {
+			log.Printf("[Antigravity] ⚠️ Could not write oauth_creds.json: %v\n", err)
+		}
+	}
 
 	// Also sync google_accounts.json
 	accFile := filepath.Join(geminiDir, "google_accounts.json")
@@ -212,7 +231,79 @@ func (s *Supervisor) parseLanguageServerLine(line string, appType string) *Langu
 	return info
 }
 
-// DiscoverAll discovers both active Antigravity IDE and Antigravity Desktop language servers
+// classifyLanguageServerLine reports whether a process line is the IDE
+// language server ("ide"), the Desktop hub ("desktop"), or neither.
+// Desktop's binary is language_server with --subclient_type hub. The IDE
+// binary is language_server_macos_arm with --subclient_type ide, and a
+// machine can have more than one of those (a parent plus a workspace server).
+func classifyLanguageServerLine(line string) string {
+	if !strings.Contains(line, "language_server") || !strings.Contains(line, "--csrf_token") {
+		return ""
+	}
+	if strings.Contains(line, "--subclient_type hub") {
+		return "desktop"
+	}
+	if strings.Contains(line, "--subclient_type ide") || strings.Contains(line, "language_server_macos_arm") {
+		return "ide"
+	}
+	if strings.Contains(line, "/Applications/Antigravity.app") {
+		return "desktop"
+	}
+	return ""
+}
+
+// orderIdeLines puts the live workspace server ahead of the parent server.
+func orderIdeLines(lines []string) []string {
+	var live, rest []string
+	for _, line := range lines {
+		if strings.Contains(line, "--enable_lsp") || strings.Contains(line, "--workspace_id") {
+			live = append(live, line)
+			continue
+		}
+		rest = append(rest, line)
+	}
+	return append(live, rest...)
+}
+
+func splitLanguageServerLines(psOutput string) (ideLines, desktopLines []string) {
+	for _, line := range strings.Split(psOutput, "\n") {
+		switch classifyLanguageServerLine(line) {
+		case "ide":
+			ideLines = append(ideLines, line)
+		case "desktop":
+			desktopLines = append(desktopLines, line)
+		}
+	}
+	return orderIdeLines(ideLines), desktopLines
+}
+
+func chooseLanguageServer(infos []*LanguageServerInfo) *LanguageServerInfo {
+	var fallback *LanguageServerInfo
+	for _, info := range infos {
+		if info == nil || !info.Connected {
+			continue
+		}
+		if fallback == nil {
+			fallback = info
+		}
+		if info.Email != "" {
+			return info
+		}
+	}
+	return fallback
+}
+
+func (s *Supervisor) infosFromLines(lines []string, appType string) []*LanguageServerInfo {
+	var infos []*LanguageServerInfo
+	for _, line := range lines {
+		if info := s.parseLanguageServerLine(line, appType); info != nil {
+			infos = append(infos, info)
+		}
+	}
+	return infos
+}
+
+// DiscoverAll discovers both active Antigravity IDE and Antigravity Desktop language servers.
 func (s *Supervisor) DiscoverAll() (*LanguageServerInfo, *LanguageServerInfo, error) {
 	cmd := exec.Command("ps", "-ax", "-o", "pid=,command=")
 	out, err := cmd.Output()
@@ -220,27 +311,10 @@ func (s *Supervisor) DiscoverAll() (*LanguageServerInfo, *LanguageServerInfo, er
 		return nil, nil, fmt.Errorf("ps command failed: %w", err)
 	}
 
-	lines := strings.Split(string(out), "\n")
-	var ideLine, desktopLine string
-
-	for _, l := range lines {
-		if ideLine == "" && strings.Contains(l, "language_server_macos_arm") && strings.Contains(l, "--csrf_token") {
-			ideLine = l
-		}
-		if desktopLine == "" && (strings.Contains(l, "/Applications/Antigravity.app") || strings.Contains(l, "--subclient_type hub")) && strings.Contains(l, "--csrf_token") {
-			desktopLine = l
-		}
-	}
-
-	var ideInfo, desktopInfo *LanguageServerInfo
-	if ideLine != "" {
-		ideInfo = s.parseLanguageServerLine(ideLine, "Antigravity IDE")
-	}
-	if desktopLine != "" {
-		desktopInfo = s.parseLanguageServerLine(desktopLine, "Antigravity Desktop")
-	}
-
-	return ideInfo, desktopInfo, nil
+	ideLines, desktopLines := splitLanguageServerLines(string(out))
+	return chooseLanguageServer(s.infosFromLines(ideLines, "Antigravity IDE")),
+		chooseLanguageServer(s.infosFromLines(desktopLines, "Antigravity Desktop")),
+		nil
 }
 
 // DiscoverLanguageServer returns primary detected language server (IDE prioritized, then Desktop)
@@ -267,7 +341,7 @@ func (s *Supervisor) DiscoverDesktopLanguageServer() (*LanguageServerInfo, error
 // populateUserStatus calls LanguageServerService/GetUserStatus over Connect protocol
 func (s *Supervisor) populateUserStatus(info *LanguageServerInfo) {
 	for _, port := range info.Ports {
-		for _, scheme := range []string{"http", "https"} {
+		for _, scheme := range []string{"https", "http"} {
 			url := fmt.Sprintf("%s://127.0.0.1:%d/exa.language_server_pb.LanguageServerService/GetUserStatus", scheme, port)
 			req, err := http.NewRequestWithContext(context.Background(), "POST", url, bytes.NewBuffer([]byte("{}")))
 			if err != nil {
@@ -394,6 +468,10 @@ func buildOAuthTokenProto(creds *models.GoogleCredentials) string {
 	expiryMsg = append(expiryMsg, encodeVarint(uint64(expSec))...)
 	buf = append(buf, encodeLengthDelimited(4, expiryMsg)...)
 
+	if creds.IdToken != "" {
+		buf = append(buf, encodeLengthDelimited(5, []byte(creds.IdToken))...)
+	}
+
 	return base64.StdEncoding.EncodeToString(buf)
 }
 
@@ -434,7 +512,48 @@ func (s *Supervisor) WriteIdeStateDB(creds *models.GoogleCredentials) error {
 	return nil
 }
 
-// PushIdeUnifiedStateUpdate pushes live OAuth token updates to running Antigravity IDE extension server
+type extensionTarget struct {
+	port int
+	csrf string
+}
+
+func extensionTargetsFromPS(psOutput string) []extensionTarget {
+	reExtPort := regexp.MustCompile(`--extension_server_port\s+(\d+)`)
+	reExtCSRF := regexp.MustCompile(`--extension_server_csrf_token\s+(\S+)`)
+	ideLines, _ := splitLanguageServerLines(psOutput)
+
+	var targets []extensionTarget
+	seen := map[int]bool{}
+	for _, line := range ideLines {
+		mPort := reExtPort.FindStringSubmatch(line)
+		mCSRF := reExtCSRF.FindStringSubmatch(line)
+		if len(mPort) < 2 || len(mCSRF) < 2 {
+			continue
+		}
+		port, _ := strconv.Atoi(mPort[1])
+		if port == 0 || seen[port] {
+			continue
+		}
+		seen[port] = true
+		targets = append(targets, extensionTarget{port: port, csrf: mCSRF[1]})
+	}
+	return targets
+}
+
+func expiryMillis(expSec int64) int64 {
+	if expSec <= 0 {
+		return time.Now().Add(time.Hour).UnixMilli()
+	}
+	if expSec > 1e11 {
+		return expSec
+	}
+	return expSec * 1000
+}
+
+// PushIdeUnifiedStateUpdate pushes live OAuth token updates to every running
+// Antigravity IDE extension server. A parent server and a workspace server
+// can both be up; stopping at the first leaves the window the user is in
+// on the previous account.
 func (s *Supervisor) PushIdeUnifiedStateUpdate(creds *models.GoogleCredentials) error {
 	cmd := exec.Command("ps", "-ax", "-o", "pid=,command=")
 	out, err := cmd.Output()
@@ -442,31 +561,12 @@ func (s *Supervisor) PushIdeUnifiedStateUpdate(creds *models.GoogleCredentials) 
 		return err
 	}
 
-	reExtPort := regexp.MustCompile(`--extension_server_port\s+(\d+)`)
-	reExtCSRF := regexp.MustCompile(`--extension_server_csrf_token\s+(\S+)`)
-
-	var extPort int
-	var extCSRF string
-
-	for _, l := range strings.Split(string(out), "\n") {
-		if strings.Contains(l, "language_server_macos_arm") && strings.Contains(l, "--extension_server_port") {
-			mPort := reExtPort.FindStringSubmatch(l)
-			mCSRF := reExtCSRF.FindStringSubmatch(l)
-			if len(mPort) > 1 && len(mCSRF) > 1 {
-				extPort, _ = strconv.Atoi(mPort[1])
-				extCSRF = mCSRF[1]
-				break
-			}
-		}
-	}
-
-	if extPort == 0 || extCSRF == "" {
+	targets := extensionTargetsFromPS(string(out))
+	if len(targets) == 0 {
 		return nil
 	}
 
 	tokenB64 := buildOAuthTokenProto(creds)
-
-	pushURL := fmt.Sprintf("http://127.0.0.1:%d/exa.extension_server_pb.ExtensionServerService/PushUnifiedStateSyncUpdate", extPort)
 	payload := map[string]any{
 		"update": map[string]any{
 			"topicName": "uss-oauth",
@@ -478,28 +578,46 @@ func (s *Supervisor) PushIdeUnifiedStateUpdate(creds *models.GoogleCredentials) 
 			},
 		},
 	}
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
+	var pushErr error
+	pushed := 0
+	for _, target := range targets {
+		if err := s.pushExtensionUpdate(target, body); err != nil {
+			log.Printf("[Antigravity] ⚠️ IDE extension push to port %d failed: %v\n", target.port, err)
+			pushErr = err
+			continue
+		}
+		pushed++
+		log.Printf("[Antigravity] 📡 Pushed live OAuth update to IDE extension server on port %d\n", target.port)
+	}
+	if pushed == 0 {
+		return pushErr
+	}
+	return nil
+}
+
+func (s *Supervisor) pushExtensionUpdate(target extensionTarget, body []byte) error {
+	pushURL := fmt.Sprintf("http://127.0.0.1:%d/exa.extension_server_pb.ExtensionServerService/PushUnifiedStateSyncUpdate", target.port)
 	req, err := http.NewRequestWithContext(context.Background(), "POST", pushURL, bytes.NewBuffer(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("connect-protocol-version", "1")
-	req.Header.Set("x-codeium-csrf-token", extCSRF)
+	req.Header.Set("x-codeium-csrf-token", target.csrf)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("push update failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		log.Printf("[Antigravity] 📡 Pushed live OAuth update to extension server on port %d\n", extPort)
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return fmt.Errorf("extension server returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	return nil
 }
@@ -586,7 +704,9 @@ func (s *Supervisor) RestartDesktopLanguageServer() error {
 
 	_ = s.PreserveConversationLayout()
 
-	// 1. Attempt graceful Connect RPC Restart over HTTPS/HTTP
+	// Ask the hub to restart itself. Killing it counts as a crash, and
+	// Desktop stops respawning the language server after three crashes
+	// in a minute, which drops agent features until the app is reopened.
 	for _, port := range info.Ports {
 		for _, scheme := range []string{"https", "http"} {
 			url := fmt.Sprintf("%s://127.0.0.1:%d/exa.language_server_pb.LanguageServerService/Restart", scheme, port)
@@ -599,26 +719,35 @@ func (s *Supervisor) RestartDesktopLanguageServer() error {
 			req.Header.Set("x-codeium-csrf-token", info.CSRF)
 
 			resp, err := s.httpClient.Do(req)
-			if err == nil {
-				resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					log.Printf("[Antigravity] 🔄 Sent RPC Restart to Antigravity Desktop (PID %d)\n", info.PID)
-					time.Sleep(2500 * time.Millisecond)
-					return nil
-				}
+			if err != nil {
+				continue
+			}
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				log.Printf("[Antigravity] 🔄 Sent RPC Restart to Antigravity Desktop (PID %d)\n", info.PID)
+				time.Sleep(2500 * time.Millisecond)
+				return nil
 			}
 		}
 	}
 
-	// 2. Fallback to process termination (SIGTERM)
-	proc, err := os.FindProcess(info.PID)
-	if err != nil {
-		return err
-	}
-	log.Printf("[Antigravity] 🔄 Signaling Antigravity Desktop (PID %d) to re-spawn...", info.PID)
-	_ = proc.Signal(syscall.SIGTERM)
-	time.Sleep(2000 * time.Millisecond)
+	log.Printf("[Antigravity] ⚠️ Desktop language server (PID %d) did not accept Restart; left the process running", info.PID)
 	return nil
+}
+
+// switchTargets reports which clients a switch request must update.
+// Empty, "both", and "all" update IDE and Desktop together.
+func switchTargets(target string) (ide bool, desktop bool) {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "", "both", "all":
+		return true, true
+	case "ide":
+		return true, false
+	case "desktop":
+		return false, true
+	default:
+		return true, true
+	}
 }
 
 // ApplyAccountSwitch atomically writes Keychain, ~/.gemini tokens, state.vscdb, USS, and restarts Desktop and/or IDE
@@ -631,10 +760,10 @@ func (s *Supervisor) ApplyAccountSwitch(creds *models.GoogleCredentials, account
 		return err
 	}
 
-	target = strings.ToLower(strings.TrimSpace(target))
+	syncIDE, syncDesktop := switchTargets(target)
 
-	// 1. Target IDE (default or if target includes ide/both/all)
-	if target == "" || target == "ide" || target == "both" || target == "all" {
+	// 1. Antigravity IDE: state DB plus every live extension server.
+	if syncIDE {
 		if err := s.WriteIdeStateDB(creds); err != nil {
 			log.Printf("[Antigravity] ⚠️ Could not write state.vscdb: %v\n", err)
 		}
@@ -648,8 +777,8 @@ func (s *Supervisor) ApplyAccountSwitch(creds *models.GoogleCredentials, account
 		}
 	}
 
-	// 2. Target Desktop (default or if target includes desktop/both/all)
-	if target == "" || target == "desktop" || target == "both" || target == "all" {
+	// 2. Antigravity Desktop: storage file, then respawn the hub.
+	if syncDesktop {
 		if accountEmail != "" {
 			if err := s.WriteDesktopStorage(accountEmail); err != nil {
 				log.Printf("[Antigravity] ⚠️ Could not write Desktop app_storage.json: %v\n", err)

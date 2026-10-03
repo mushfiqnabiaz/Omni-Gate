@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -21,8 +22,6 @@ import (
 
 var (
 	GoogleTokenURL     = "https://oauth2.googleapis.com/token"
-	GoogleClientID     = os.Getenv("GOOGLE_CLIENT_ID")
-	GoogleClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
 	CloudCodeQuotaURL  = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 	CloudCodeUserAgent = "antigravity/4.3.0 darwin/arm64"
 )
@@ -62,7 +61,7 @@ func (c *GoogleClient) RefreshTokenIfNeeded(ctx context.Context, creds *models.G
 	}
 
 	// Token is valid if expires more than 120 seconds in the future
-	if expSec > (nowSec + 120) && creds.AccessToken != "" {
+	if expSec > (nowSec+120) && creds.AccessToken != "" {
 		return false, nil
 	}
 
@@ -71,8 +70,8 @@ func (c *GoogleClient) RefreshTokenIfNeeded(ctx context.Context, creds *models.G
 	}
 
 	form := url.Values{}
-	form.Set("client_id", GoogleClientID)
-	form.Set("client_secret", GoogleClientSecret)
+	form.Set("client_id", os.Getenv("GOOGLE_CLIENT_ID"))
+	form.Set("client_secret", os.Getenv("GOOGLE_CLIENT_SECRET"))
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", creds.RefreshToken)
 
@@ -93,15 +92,26 @@ func (c *GoogleClient) RefreshTokenIfNeeded(ctx context.Context, creds *models.G
 		return false, fmt.Errorf("token refresh failed (%d): %s", resp.StatusCode, string(body))
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, err
+	}
+
 	var res struct {
 		AccessToken string `json:"access_token"`
+		IdToken     string `json:"id_token"`
 		ExpiresIn   int64  `json:"expires_in"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	if err := json.Unmarshal(body, &res); err != nil {
 		return false, err
 	}
 
 	creds.AccessToken = res.AccessToken
+	if res.IdToken != "" {
+		creds.IdToken = res.IdToken
+	} else {
+		log.Printf("[Gateway] Google token refresh returned no id_token")
+	}
 	creds.ExpiryTimestamp = time.Now().Unix() + res.ExpiresIn
 	return true, nil
 }

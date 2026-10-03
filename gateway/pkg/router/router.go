@@ -399,7 +399,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 	if ok && time.Now().Before(cached.ExpiresAt) {
 		log.Printf("[Gateway] ⚡ CACHE HIT for model %s. Served in sub-100ms.", chatReq.Model)
 		durMs := int(time.Since(startTime).Milliseconds())
-		
+
 		if chatReq.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
@@ -419,7 +419,7 @@ func (r *Router) handleChatCompletions(w http.ResponseWriter, req *http.Request)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(cached.Response)
 		}
-		
+
 		_ = r.db.RecordRequestLog(req.Context(), uuid.New().String(), vKeyID, "CACHE", "cache", chatReq.Model, promptTokens, 0, durMs, http.StatusOK, "Semantic Cache Hit")
 		return
 	}
@@ -934,6 +934,20 @@ func (r *Router) handleSetActiveAccount(w http.ResponseWriter, req *http.Request
 	if account.Provider == models.ProviderGoogle {
 		var creds models.GoogleCredentials
 		if err := json.Unmarshal(account.Credentials, &creds); err == nil {
+			// Always refresh on a switch so IDE and Desktop both receive a
+			// current access token and id_token. A still-valid access token
+			// would otherwise skip the refresh and leave one client on the
+			// previous identity.
+			creds.ExpiryTimestamp = 0
+			refreshed, refreshErr := r.googleCl.RefreshTokenIfNeeded(req.Context(), &creds)
+			if refreshErr != nil {
+				log.Printf("[Gateway] ⚠️ Token refresh before account switch failed: %v\n", refreshErr)
+				http.Error(w, "Token refresh failed; IDE and Desktop were not switched", http.StatusBadGateway)
+				return
+			}
+			if refreshed {
+				_ = r.db.UpdateAccountCredentials(req.Context(), account.ID, creds)
+			}
 			err = r.supervisor.ApplyAccountSwitch(&creds, account.Email, body.Target, body.Force)
 			if err != nil {
 				log.Printf("[Gateway] ⚠️ Antigravity sync notice: %v\n", err)
@@ -1314,7 +1328,7 @@ func (r *Router) sendDailyReportWebhook(ctx context.Context) {
 			var pTok, cTok int
 			if err := summaryRows.Scan(&m, &pTok, &cTok); err == nil {
 				pricing := getModelPricing(m)
-				cost := (float64(pTok)*pricing.PromptPricePer1M/1_000_000.0) + (float64(cTok)*pricing.CompletionPricePer1M/1_000_000.0)
+				cost := (float64(pTok) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(cTok) * pricing.CompletionPricePer1M / 1_000_000.0)
 				yesterdaySavingsUSD += cost
 			}
 		}
@@ -1463,7 +1477,7 @@ func (r *Router) handleLogs(w http.ResponseWriter, req *http.Request) {
 			var calls, pTok, cTok int
 			if err := summaryRows.Scan(&m, &calls, &pTok, &cTok); err == nil {
 				pricing := getModelPricing(m)
-				apiCost := (float64(pTok)*pricing.PromptPricePer1M/1_000_000.0) + (float64(cTok)*pricing.CompletionPricePer1M/1_000_000.0)
+				apiCost := (float64(pTok) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(cTok) * pricing.CompletionPricePer1M / 1_000_000.0)
 				antigravityCost := 0.00
 				savings := apiCost
 
@@ -1546,7 +1560,7 @@ func (r *Router) handleLogs(w http.ResponseWriter, req *http.Request) {
 		}
 
 		pricing := getModelPricing(model)
-		apiCost := (float64(pTokens)*pricing.PromptPricePer1M/1_000_000.0) + (float64(cTokens)*pricing.CompletionPricePer1M/1_000_000.0)
+		apiCost := (float64(pTokens) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(cTokens) * pricing.CompletionPricePer1M / 1_000_000.0)
 		antigravityCost := 0.00
 		savings := apiCost
 		totTokens := pTokens + cTokens
@@ -1723,9 +1737,9 @@ func (r *Router) handleAnalytics(w http.ResponseWriter, req *http.Request) {
 			var pTok, cTok, tpTok, tcTok, h24pTok, h24cTok, mCalls int
 			if err := summaryRows.Scan(&m, &pTok, &cTok, &tpTok, &tcTok, &h24pTok, &h24cTok, &mCalls); err == nil {
 				pricing := getModelPricing(m)
-				costAll := (float64(pTok)*pricing.PromptPricePer1M/1_000_000.0) + (float64(cTok)*pricing.CompletionPricePer1M/1_000_000.0)
-				costToday := (float64(tpTok)*pricing.PromptPricePer1M/1_000_000.0) + (float64(tcTok)*pricing.CompletionPricePer1M/1_000_000.0)
-				cost24h := (float64(h24pTok)*pricing.PromptPricePer1M/1_000_000.0) + (float64(h24cTok)*pricing.CompletionPricePer1M/1_000_000.0)
+				costAll := (float64(pTok) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(cTok) * pricing.CompletionPricePer1M / 1_000_000.0)
+				costToday := (float64(tpTok) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(tcTok) * pricing.CompletionPricePer1M / 1_000_000.0)
+				cost24h := (float64(h24pTok) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(h24cTok) * pricing.CompletionPricePer1M / 1_000_000.0)
 
 				totalSavingsUSD += costAll
 				todaySavingsUSD += costToday
@@ -1781,7 +1795,7 @@ func (r *Router) handleAnalytics(w http.ResponseWriter, req *http.Request) {
 					hourlyMap[unixHour] = &hourStat{}
 				}
 				pricing := getModelPricing(m)
-				cost := (float64(pTok)*pricing.PromptPricePer1M/1_000_000.0) + (float64(cTok)*pricing.CompletionPricePer1M/1_000_000.0)
+				cost := (float64(pTok) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(cTok) * pricing.CompletionPricePer1M / 1_000_000.0)
 				hourlyMap[unixHour].calls += calls
 				hourlyMap[unixHour].pTok += pTok
 				hourlyMap[unixHour].cTok += cTok
@@ -1854,7 +1868,7 @@ func (r *Router) handleAnalytics(w http.ResponseWriter, req *http.Request) {
 					dailyMap[dayKey] = &dayStat{}
 				}
 				pricing := getModelPricing(m)
-				cost := (float64(pTok)*pricing.PromptPricePer1M/1_000_000.0) + (float64(cTok)*pricing.CompletionPricePer1M/1_000_000.0)
+				cost := (float64(pTok) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(cTok) * pricing.CompletionPricePer1M / 1_000_000.0)
 				dailyMap[dayKey].calls += calls
 				dailyMap[dayKey].pTok += pTok
 				dailyMap[dayKey].cTok += cTok
@@ -2016,7 +2030,7 @@ func (r *Router) handleAnalytics(w http.ResponseWriter, req *http.Request) {
 			var pTok, cTok int
 			if err := recent15Rows.Scan(&m, &pTok, &cTok); err == nil {
 				pricing := getModelPricing(m)
-				cost := (float64(pTok)*pricing.PromptPricePer1M/1_000_000.0) + (float64(cTok)*pricing.CompletionPricePer1M/1_000_000.0)
+				cost := (float64(pTok) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(cTok) * pricing.CompletionPricePer1M / 1_000_000.0)
 				recent15mSavingsUSD += cost
 			}
 		}
@@ -2144,7 +2158,7 @@ func (r *Router) handleAnalyticsExport(w http.ResponseWriter, req *http.Request)
 
 		if err := rows.Scan(&reqID, &createdAt, &provider, &model, &clientOrigin, &accEmail, &pTok, &cTok, &durMs, &statusCode, &errText); err == nil {
 			pricing := getModelPricing(model)
-			apiCost := (float64(pTok)*pricing.PromptPricePer1M/1_000_000.0) + (float64(cTok)*pricing.CompletionPricePer1M/1_000_000.0)
+			apiCost := (float64(pTok) * pricing.PromptPricePer1M / 1_000_000.0) + (float64(cTok) * pricing.CompletionPricePer1M / 1_000_000.0)
 			items = append(items, exportItem{
 				ReqID:            reqID,
 				CreatedAt:        createdAt,
@@ -2343,4 +2357,3 @@ func (r *Router) handleRaceEngine(ctx context.Context, w http.ResponseWriter, re
 	_ = r.db.RecordRequestLog(ctx, uuid.New().String(), vKeyID, winnerResult.accountID, winnerResult.provider, winnerResult.model, promptTokens, winnerResult.completionTokens, durMs, http.StatusOK, "Race Winner")
 	_ = r.db.RecordKeyUsage(ctx, vKeyID, promptTokens+winnerResult.completionTokens)
 }
-
